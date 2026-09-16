@@ -1,0 +1,28 @@
+name: Daily Job Push
+
+on:
+  schedule:
+    # 每天 UTC 时间 13:00 (美东时间 09:00 / 北京时间 21:00) 自动触发
+    - cron: '0 13 * * *'
+  workflow_dispatch: # 支持手动按按钮立即测试
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Install Dependencies
+        run: pip install requests
+
+      - name: Run Job Fetcher
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python fetch_jobs.py
