@@ -2,88 +2,87 @@ import os
 import re
 import requests
 
-# SimplifyJobs 2026 / New Grad 岗位库 Raw 地址
+# SimplifyJobs New Grad Positions
 URL = "https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/README.md"
 
-# 专注 MLE / Data / SDE 相关的匹配关键词
 KEYWORDS = [
-    r"\bmle\b", r"machine learning", r"data scientist", r"data science",
+    r"\bmle\b", r"machine learning", r"data scientist", r"data science", 
     r"data analyst", r"applied scientist", r"\bsde\b", r"software engineer", 
-    r"software development", r"quantitative"
+    r"software development", r"quant"
 ]
 
 def clean_text(text):
-    """清理 Markdown 格式（如 **Bold**, [Text](url) 等）"""
     if not text:
         return ""
-    # 提取 Markdown 链接中的纯文本 [Company](url) -> Company
+    # 提取 HTML 链接中的文字或 Markdown 链接
+    text = re.sub(r'<a[^>]*>(.*?)</a>', r'\1', text)
     text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
-    # 去除 HTML 标签如 <a ...>
-    text = re.sub(r'<[^>]+>', '', text)
-    # 去除 ** 或 *
     text = re.sub(r'[\*\`]', '', text)
     return text.strip()
 
-def extract_link(cell):
-    """从单元格提取真实的申请 URL"""
-    if not cell:
+def extract_link(text):
+    if not text:
         return None
     # 匹配 href="URL"
-    href_match = re.search(r'href=["\']([^"\']+)["\']', cell)
+    href_match = re.search(r'href=["\']([^"\']+)["\']', text)
     if href_match:
         return href_match.group(1)
-    # 匹配 Markdown [apply](URL)
-    md_match = re.search(r'\((https?://[^\)]+)\)', cell)
+    # 匹配 Markdown (URL)
+    md_match = re.search(r'\((https?://[^\)]+)\)', text)
     if md_match:
         return md_match.group(1)
     return None
 
 def fetch_and_filter():
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    }
+    headers = {"User-Agent": "Mozilla/5.0"}
     response = requests.get(URL, headers=headers)
+    
     if response.status_code != 200:
-        print(f"❌ Failed to fetch data. HTTP Status: {response.status_code}")
+        print(f"❌ HTTP Error: {response.status_code}")
         return
     
     lines = response.text.split("\n")
     matched_jobs = []
     
     for line in lines:
-        # 表格行必须包含 '|'
         if "|" in line:
             parts = [p.strip() for p in line.split("|")]
-            # 表格列通常为: | Company | Role | Location | Application | Age/Date | ...
+            # 过滤掉非表格行
             if len(parts) >= 5:
-                company_raw = parts[1]
-                role_raw = parts[2]
-                location_raw = parts[3]
-                link_raw = parts[4]
+                # 表格字段一般为：| Company | Role | Location | Application | Age/Date |
+                company_col = parts[1]
+                role_col = parts[2]
+                location_col = parts[3]
+                app_col = parts[4]
                 
-                # 排除表头行
-                if "company" in company_raw.lower() or "---" in company_raw:
+                if "company" in company_col.lower() or "---" in company_col:
                     continue
                 
-                # 提取链接（如果没有有效链接或已关闭🔒，跳过）
-                link = extract_link(link_raw)
-                if not link or "🔒" in link_raw:
+                # 检查岗位是否锁定 (🔒 代表 closed)
+                if "🔒" in app_col or "🔒" in line:
                     continue
                 
-                company = clean_text(company_raw)
-                role = clean_text(role_raw)
-                location = clean_text(location_raw)
+                link = extract_link(app_col)
+                if not link:
+                    link = extract_link(line) # 全行备用提取
                 
-                # 结合 company 和 role 进行关键词校验
-                search_target = f"{company} {role}".lower()
-                if any(re.search(kw, search_target) for kw in KEYWORDS):
+                if not link:
+                    continue
+
+                company = clean_text(company_col)
+                role = clean_text(role_col)
+                location = clean_text(location_col)
+                
+                target = f"{company} {role}".lower()
+                if any(re.search(kw, target) for kw in KEYWORDS):
+                    # Telegram 消息格式化
                     matched_jobs.append(f"• **{company}** | {role}\n  📍 {location}\n  🔗 {link}")
 
-    print(f"✅ Total matching New Grad jobs found: {len(matched_jobs)}")
-    
+    print(f"✅ Found {len(matched_jobs)} matching New Grad jobs.")
+
     if matched_jobs:
-        # 取最新的 10 个匹配岗位推送
-        msg = "🎓 **New Grad (MLE / Data / SDE) 岗位推送**\n\n" + "\n\n".join(matched_jobs[:10])
+        # 每次取前 8 条发送，防止 Telegram 超过 4096 字符上限限制
+        msg = "🎓 **New Grad (MLE / Data / SDE) 最新岗位**\n\n" + "\n\n".join(matched_jobs[:8])
         send_telegram(msg)
     else:
         print("⚠️ No matching jobs found.")
@@ -93,7 +92,7 @@ def send_telegram(text):
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     
     if not token or not chat_id:
-        print("❌ Error: Missing TELEGRAM_TOKEN or TELEGRAM_CHAT_ID in environment secrets.")
+        print("❌ Missing Secrets!")
         return
     
     url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -104,9 +103,9 @@ def send_telegram(text):
         "disable_web_page_preview": True
     }
     res = requests.post(url, json=payload)
-    print("Telegram API Response Code:", res.status_code)
+    print(f"Telegram Push Status Code: {res.status_code}")
     if res.status_code != 200:
-        print("Telegram API Response Text:", res.text)
+        print(f"Response: {res.text}")
 
 if __name__ == "__main__":
     fetch_and_filter()
