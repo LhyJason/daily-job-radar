@@ -3,7 +3,7 @@ name: Daily Job Push
 on:
   schedule:
     # 每天 UTC 13:00 (美东 09:00) 自动触发
-    - cron: '0 */6 * * *'
+    - cron: '03 */6 * * *'
   workflow_dispatch:
 
 jobs:
