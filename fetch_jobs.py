@@ -2,16 +2,10 @@ import os
 import re
 import requests
 
-# 1. 明确指向包含实际岗位表格的两个子 Markdown 文件
+# SimplifyJobs 包含实际岗位表格的 Markdown 文件
 URLS = [
     "https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/Software%20Engineering.md",
     "https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/Data%20Science%2C%20AI%20%26%20Machine%20Learning.md"
-]
-
-# 2. 地点筛选：美国 (US, USA, 各州缩写) 以及 香港 (Hong Kong, HK)
-LOC_KEYWORDS = [
-    r"\busa?\b", r"\bunited states\b", r"\bhong kong\b", r"\bhk\b",
-    r"\bca\b", r"\bny\b", r"\bwa\b", r"\btx\b", r"\bma\b", r"\bil\b", r"\bnc\b", r"\bnj\b", r"\bremote\b"
 ]
 
 def clean_text(text):
@@ -21,6 +15,14 @@ def clean_text(text):
     text = re.sub(r'<[^>]+>', ' ', text)
     text = re.sub(r'[\*\`🔥]', '', text)
     return " ".join(text.split())
+
+def escape_markdown(text):
+    if not text:
+        return ""
+    # 转义 Telegram Markdown 中的敏感字符
+    for char in ['_', '*', '`', '[']:
+        text = text.replace(char, f'\\{char}')
+    return text
 
 def extract_link(cell):
     if not cell:
@@ -41,11 +43,12 @@ def fetch_and_filter():
         try:
             res = requests.get(url, headers=headers, timeout=15)
             if res.status_code != 200:
+                print(f"⚠️ Failed to fetch {url}, status code: {res.status_code}")
                 continue
             
             lines = res.text.split("\n")
             for line in lines:
-                # 过滤掉非表格行、表头分隔符以及已经关闭(🔒)的岗位
+                # 过滤非表格行、表头分隔符以及已经关闭(🔒)的岗位
                 if "|" in line and not "---" in line and not "🔒" in line:
                     parts = [p.strip() for p in line.split("|")]
                     if len(parts) >= 4:
@@ -60,34 +63,33 @@ def fetch_and_filter():
                         role = clean_text(role_col)
                         location = clean_text(location_col)
 
-                        # 地点过滤：必须包含美国或香港
-                        loc_lower = location.lower()
-                        if not any(re.search(kw, loc_lower) for kw in LOC_KEYWORDS):
-                            continue
-
                         link = extract_link(line)
                         if not link:
                             continue
 
-                        matched_jobs.append(f"• **{company}** | {role}\n  📍 {location}\n  🔗 {link}")
+                        safe_company = escape_markdown(company)
+                        safe_role = escape_markdown(role)
+                        safe_location = escape_markdown(location)
+
+                        matched_jobs.append(f"• **{safe_company}** | {safe_role}\n  📍 {safe_location}\n  🔗 {link}")
         except Exception as e:
             print(f"Error fetching {url}: {e}")
 
-    print(f"✅ Parsed total {len(matched_jobs)} matching target jobs.")
+    print(f"✅ Total matched jobs: {len(matched_jobs)}")
 
     if matched_jobs:
-        # 挑选最新的 8 条推送，防止单条 Telegram 文本溢出
-        msg = "🎓 **New Grad (SDE / DS / AI / MLE) 最新岗位 (美/港)**\n\n" + "\n\n".join(matched_jobs[:8])
-        send_telegram(msg)
+        msg = "🎓 **New Grad (SDE / DS / AI / MLE) 全球最新岗位**\n\n" + "\n\n".join(matched_jobs[:8])
     else:
-        print("⚠️ No matching jobs found.")
+        msg = "🤖 **Job Radar 通知**\n\n数据抓取成功，但当前源中暂无最新岗位。"
+
+    send_telegram(msg)
 
 def send_telegram(text):
     token = os.environ.get("TELEGRAM_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
 
     if not token or not chat_id:
-        print("❌ Error: Secrets TELEGRAM_TOKEN or TELEGRAM_CHAT_ID missing!")
+        print("❌ Error: Missing TELEGRAM_TOKEN or TELEGRAM_CHAT_ID")
         return
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
