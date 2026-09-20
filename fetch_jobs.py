@@ -1,88 +1,116 @@
 import os
-import re
+import time
+import html
 import requests
 
-# SimplifyJobs 包含实际岗位表格的 Markdown 文件
-URLS = [
-    "https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/Software%20Engineering.md",
-    "https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/Data%20Science%2C%20AI%20%26%20Machine%20Learning.md"
-]
+# SimplifyJobs 现在维护的机器可读数据源（README 从不被解析，用这个 JSON）
+LISTINGS_URL = "https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/.github/scripts/listings.json"
 
-def clean_text(text):
-    if not text:
-        return ""
-    text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
-    text = re.sub(r'<[^>]+>', ' ', text)
-    text = re.sub(r'[\*\`🔥]', '', text)
-    return " ".join(text.split())
+# 可浏览的完整岗位表格（早于时间窗口的岗位在这里自己翻）
+BROWSE_URL = "https://github.com/SimplifyJobs/New-Grad-Positions"
 
-def escape_markdown(text):
-    if not text:
-        return ""
-    # 转义 Telegram Markdown 中的敏感字符
-    for char in ['_', '*', '`', '[']:
-        text = text.replace(char, f'\\{char}')
-    return text
+# 只要这些分类：SDE / DS / AI / MLE
+TARGET_CATEGORIES = {"Software", "AI/ML/Data"}
 
-def extract_link(cell):
-    if not cell:
-        return None
-    href = re.search(r'href=["\'](https?://[^"\']+)["\']', cell)
-    if href:
-        return href.group(1)
-    md = re.search(r'\((https?://[^\)]+)\)', cell)
-    if md:
-        return md.group(1)
-    return None
+# 只推近多少小时内新发布的岗位
+WINDOW_HOURS = 72
+
+# 单条消息最多展示多少条（防止 Telegram 消息过长）
+MAX_JOBS = 15
+
+# 如果只想要美国/加拿大/Remote 的岗位，把下面设为 True
+US_CANADA_REMOTE_ONLY = False
+
 
 def fetch_and_filter():
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    matched_jobs = []
 
-    for url in URLS:
-        try:
-            res = requests.get(url, headers=headers, timeout=15)
-            if res.status_code != 200:
-                print(f"⚠️ Failed to fetch {url}, status code: {res.status_code}")
-                continue
-            
-            lines = res.text.split("\n")
-            for line in lines:
-                # 过滤非表格行、表头分隔符以及已经关闭(🔒)的岗位
-                if "|" in line and not "---" in line and not "🔒" in line:
-                    parts = [p.strip() for p in line.split("|")]
-                    if len(parts) >= 4:
-                        company_col = parts[1]
-                        role_col = parts[2]
-                        location_col = parts[3]
+    try:
+        res = requests.get(LISTINGS_URL, headers=headers, timeout=20)
+    except Exception as e:
+        print(f"Error fetching listings: {e}")
+        send_telegram("🤖 <b>Job Radar</b>\n\n抓取失败：无法连接数据源。")
+        return
 
-                        if "company" in company_col.lower() or "role" in role_col.lower():
-                            continue
+    if res.status_code != 200:
+        print(f"⚠️ Failed to fetch listings, status code: {res.status_code}")
+        send_telegram(f"🤖 <b>Job Radar</b>\n\n抓取失败，HTTP {res.status_code}。")
+        return
 
-                        company = clean_text(company_col)
-                        role = clean_text(role_col)
-                        location = clean_text(location_col)
+    try:
+        listings = res.json()
+    except Exception as e:
+        print(f"Error parsing JSON: {e}")
+        send_telegram("🤖 <b>Job Radar</b>\n\n数据源解析失败（不是合法 JSON）。")
+        return
 
-                        link = extract_link(line)
-                        if not link:
-                            continue
+    cutoff = time.time() - WINDOW_HOURS * 3600
 
-                        safe_company = escape_markdown(company)
-                        safe_role = escape_markdown(role)
-                        safe_location = escape_markdown(location)
+    jobs = []
+    for job in listings:
+        # 只要还开着、可见、且属于目标分类的岗位
+        if not job.get("active"):
+            continue
+        if not job.get("is_visible"):
+            continue
+        if job.get("category") not in TARGET_CATEGORIES:
+            continue
 
-                        matched_jobs.append(f"• **{safe_company}** | {safe_role}\n  📍 {safe_location}\n  🔗 {link}")
-        except Exception as e:
-            print(f"Error fetching {url}: {e}")
+        # 只保留近 WINDOW_HOURS 小时内发布的
+        if job.get("date_posted", 0) < cutoff:
+            continue
 
-    print(f"✅ Total matched jobs: {len(matched_jobs)}")
+        locations = job.get("locations") or []
+        if US_CANADA_REMOTE_ONLY and not _is_us_ca_remote(locations):
+            continue
 
-    if matched_jobs:
-        msg = "🎓 **New Grad (SDE / DS / AI / MLE) 全球最新岗位**\n\n" + "\n\n".join(matched_jobs[:8])
+        jobs.append(job)
+
+    # 按发布时间倒序，最新的在前
+    jobs.sort(key=lambda j: j.get("date_posted", 0), reverse=True)
+
+    total = len(jobs)
+    print(f"✅ Matched (active, last {WINDOW_HOURS}h) jobs: {total}")
+
+    matched = []
+    for job in jobs[:MAX_JOBS]:
+        company = html.escape(str(job.get("company_name", "")).strip())
+        role = html.escape(str(job.get("title", "")).strip())
+        location = html.escape(", ".join(job.get("locations") or []) or "N/A")
+        link = job.get("url", "")
+
+        matched.append(
+            f"• <b>{company}</b> | {role}\n"
+            f"  📍 {location}\n"
+            f"  🔗 {link}"
+        )
+
+    if matched:
+        header = f"🎓 <b>New Grad (SDE / DS / AI / MLE) · 近 {WINDOW_HOURS}h 新岗位</b>\n\n"
+        msg = header + "\n\n".join(matched)
+        if total > MAX_JOBS:
+            msg += f"\n\n…还有 {total - MAX_JOBS} 条未展示。"
     else:
-        msg = "🤖 **Job Radar 通知**\n\n数据抓取成功，但当前源中暂无最新岗位。"
+        msg = f"🤖 <b>Job Radar</b>\n\n近 {WINDOW_HOURS}h 内暂无符合条件的在招新岗位。"
+
+    # 末尾附上完整列表链接，方便翻更早的
+    msg += f"\n\n📚 <a href=\"{BROWSE_URL}\">查看完整列表（更早的岗位）</a>"
 
     send_telegram(msg)
+
+
+def _is_us_ca_remote(locations):
+    """粗略判断是否美国/加拿大/Remote。数据里 UK 岗位很多，需要时用来过滤。"""
+    non_us = ("UK", "United Kingdom", "England")
+    for loc in locations:
+        if "remote" in loc.lower():
+            return True
+        if any(tag in loc for tag in non_us):
+            continue
+        # 其余默认当作美国/加拿大
+        return True
+    return False
+
 
 def send_telegram(text):
     token = os.environ.get("TELEGRAM_TOKEN")
@@ -96,14 +124,15 @@ def send_telegram(text):
     payload = {
         "chat_id": chat_id,
         "text": text,
-        "parse_mode": "Markdown",
-        "disable_web_page_preview": True
+        "parse_mode": "HTML",  # HTML 比 legacy Markdown 稳，链接里的 _ * 不会炸
+        "disable_web_page_preview": True,
     }
 
     r = requests.post(url, json=payload)
     print(f"Telegram API Status Code: {r.status_code}")
     if r.status_code != 200:
         print(f"Error detail: {r.text}")
+
 
 if __name__ == "__main__":
     fetch_and_filter()
